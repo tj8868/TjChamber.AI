@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException, Request, Depends, status
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.security import OAuth2PasswordBearer
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import sqlite3
 import hashlib
 from datetime import datetime, timedelta
@@ -16,6 +17,7 @@ from typing import List, Optional, Dict, Any
 import secrets
 import jwt
 import os
+from ml_service import ChatService
 
 # ============================================================
 # CONFIGURATION
@@ -25,6 +27,10 @@ DB_PATH = "chamber.db"
 SECRET_KEY = os.getenv("SECRET_KEY", "chamber-ai-super-secret-key-change-in-prod")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
+
+# Chat Service
+# Pass DB Path so chatbot can read inventory
+chat_service = ChatService(DB_PATH)
 
 app = FastAPI(
     title="Jahan Health Care",
@@ -507,6 +513,36 @@ def dashboard_stats(user: dict = Depends(get_current_user)):
     }
     conn.close()
     return stats
+
+# ============================================================
+# CHATBOT FEATURE
+# ============================================================
+
+class ChatRequest(BaseModel):
+    message: str
+
+@app.on_event("startup")
+def startup_event():
+    print("🧠 Initializing Chatbot Model (Pre-loading)...")
+    try:
+        ChatService.load_model()
+        print("✅ Chatbot Model Loaded & Ready.")
+    except Exception as e:
+        print(f"❌ Failed to load Chatbot Model on startup: {e}")
+
+@app.post("/api/chat")
+def chat_endpoint(req: ChatRequest, user: dict = Depends(get_current_user)):
+    """
+    General purpose chatbot using local Orca Mini AI.
+    """
+    print(f"📩 Chat Request: '{req.message}'")
+    try:
+        response = chat_service.get_response(req.message)
+        return {"reply": response}
+    except Exception as e:
+        print(f"❌ Chat Endpoint Error: {e}")
+        return {"reply": "Sorry, I am having trouble thinking right now."}
+
 
 # ============================================================
 # STATIC FRONTEND
@@ -1164,6 +1200,38 @@ def serve_app():
 
             </main>
         </div>
+        
+        <!-- CHAT WIDGET -->
+        <div v-if="token" class="fixed bottom-6 right-6 z-[9999]">
+            <!-- Chat Window -->
+            <div v-if="isChatOpen" class="bg-white rounded-2xl shadow-2xl border border-gray-200 w-80 mb-4 overflow-hidden flex flex-col animate-slide-up" style="height: 480px;">
+                <div class="bg-gradient-to-r from-emerald-600 to-teal-600 p-4 flex justify-between items-center text-white">
+                    <h4 class="font-bold flex items-center gap-2"><i class="fas fa-robot"></i> Clinic Assistant</h4>
+                    <button @click="isChatOpen = false" class="hover:text-gray-200"><i class="fas fa-times"></i></button>
+                </div>
+                <div id="chat-container" class="flex-grow p-4 overflow-y-auto space-y-3 bg-gray-50">
+                    <div v-for="msg in chatMessages" :class="msg.sender === 'user' ? 'text-right' : 'text-left'">
+                        <div class="inline-block px-3 py-2 rounded-lg text-sm max-w-[85%]" 
+                             :class="msg.sender === 'user' ? 'bg-emerald-600 text-white rounded-br-none' : 'bg-white text-gray-800 border border-gray-200 rounded-bl-none shadow-sm'">
+                            {{ msg.text }}
+                        </div>
+                    </div>
+                    <div v-if="isChatThinking" class="text-xs text-gray-400 italic text-center animate-pulse">Thinking...</div>
+                </div>
+                <div class="p-3 bg-white border-t border-gray-100 flex gap-2">
+                    <input v-model="chatInput" @keyup.enter="sendMessage" placeholder="Ask about inventory, patients, revenue..." class="flex-grow text-sm border border-gray-200 rounded-full px-4 py-2 focus:outline-none focus:border-emerald-500">
+                    <button @click="sendMessage" class="w-8 h-8 rounded-full bg-emerald-600 text-white flex items-center justify-center hover:bg-emerald-700 transition">
+                        <i class="fas fa-paper-plane text-xs"></i>
+                    </button>
+                </div>
+            </div>
+            
+            <!-- Floating Button -->
+            <button @click="isChatOpen = !isChatOpen" class="w-14 h-14 rounded-full bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow-xl hover:shadow-2xl hover:scale-110 transition flex items-center justify-center text-2xl z-[9999]">
+                <i class="fas" :class="isChatOpen ? 'fa-comment-slash' : 'fa-comment-alt'"></i>
+            </button>
+        </div>
+
     </div>
 
     <script>
@@ -1184,6 +1252,14 @@ def serve_app():
                     visits: [],
                     reports: { history: [], revenue: [] },
                     
+                    // Chatbot State
+                    isChatOpen: false,
+                    chatInput: '',
+                    chatMessages: [
+                        {sender: 'bot', text: 'Hello! I am your clinic assistant. Ask me anything.'}
+                    ],
+                    isChatThinking: false,
+
                     showPatientModal: false,
                     isEditingPatient: false,
                     patientForm: { id: null, name: '', nid: '', phone: '', age: '', gender: '', address: '' },
@@ -1234,6 +1310,28 @@ def serve_app():
                 }
             },
             methods: {
+                async sendMessage() {
+                    const txt = this.chatInput.trim();
+                    if (!txt) return;
+                    
+                    this.chatMessages.push({sender: 'user', text: txt});
+                    this.chatInput = '';
+                    this.isChatThinking = true;
+                    
+                    try {
+                        const res = await this.api('/api/chat', 'POST', { message: txt });
+                        this.chatMessages.push({sender: 'bot', text: res.reply});
+                    } catch (e) {
+                         console.error(e);
+                         this.chatMessages.push({sender: 'bot', text: 'Connection timeout. Database might be busy.'});
+                    } finally {
+                        this.isChatThinking = false;
+                        this.$nextTick(() => {
+                            const container = document.getElementById('chat-container');
+                            if(container) container.scrollTop = container.scrollHeight;
+                        });
+                    }
+                },
                 addMedicine() {
                     if (!this.selectedRemedyId) return;
                     // Check if already added
@@ -1280,6 +1378,13 @@ def serve_app():
                     };
                     if (body) opts.body = JSON.stringify(body);
                     const res = await fetch(url, opts);
+                    
+                    if (res.status === 401) {
+                        this.logout();
+                        alert("Your session has expired. Please login again.");
+                        return null;
+                    }
+                    
                     return await res.json();
                 },
                 async loadAll() {
