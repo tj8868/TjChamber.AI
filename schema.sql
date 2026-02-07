@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS patients (
 CREATE TABLE IF NOT EXISTS remedies (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
-    potency TEXT CHECK(potency IN ('1X','2X', '6X', '12X', '200', '30', '60')),     --here check is a constraint keyword 
+    barcode TEXT UNIQUE,
+    potency TEXT CHECK(potency IS NULL OR potency IN ('1X','2X', '6X', '12X', '200', '30', '60')),
     description TEXT,
     current_unit_price REAL NOT NULL,
     stock_quantity INTEGER DEFAULT 0,
@@ -118,8 +119,3 @@ JOIN visits v ON vm.visit_id = v.id
 JOIN patients p ON v.patient_id = p.id
 JOIN remedies r ON vm.remedy_id = r.id;
 
--- VIEWS (Analytics)
-CREATE VIEW IF NOT EXISTS today_stats AS
-SELECT 
-    (SELECT COUNT(*) FROM visits WHERE DATE(visit_date) = DATE('now')) as visits_today,
-    (SELECT COUNT(*) FROM patients WHERE DATE(created_at) = DATE('now')) as patients_today;
